@@ -11,7 +11,7 @@ import {
 } from '../components/ui';
 
 export const SuppliersPage = () => {
-    const { data: MOCK, addSupplier, updateSupplier } = useApp();
+    const { data: MOCK, addSupplier, updateSupplier, deleteSupplier } = useApp();
     const [search, setSearch] = useState('');
     const [showNew, setShowNew] = useState(false);
     const [editingSupplier, setEditingSupplier] = useState(null);
@@ -59,6 +59,24 @@ export const SuppliersPage = () => {
         setShowNew(true);
     };
 
+    const handleDelete = async (supplier) => {
+        if (!supplier) return;
+        if (window.confirm(`¿Estás seguro de que deseas eliminar al proveedor "${supplier.name}"? Esta acción no se puede deshacer.`)) {
+            setSaving(true);
+            try {
+                await deleteSupplier(supplier.id);
+                setShowNew(false);
+                setEditingSupplier(null);
+                setNewSupplier({ name: '', contact: '', phone: '', cuit: '', category: '' });
+            } catch (err) {
+                console.error(err);
+                alert('Error al eliminar proveedor: ' + (err.message || ''));
+            } finally {
+                setSaving(false);
+            }
+        }
+    };
+
     return (
         <div className="page-content">
             <div className="page-grid" style={{ gridTemplateColumns: '1fr' }}>
@@ -69,7 +87,7 @@ export const SuppliersPage = () => {
                             <input type="text" placeholder="Buscar proveedores..." value={search} onChange={e => setSearch(e.target.value)} />
                         </div>
                     </div>
-                    <button className="btn btn-primary" onClick={() => setShowNew(true)}>
+                    <button className="btn btn-primary" onClick={() => { setEditingSupplier(null); setNewSupplier({ name: '', contact: '', phone: '', cuit: '', category: '' }); setShowNew(true); }}>
                         <Icon name="add" size={18} /> Nuevo Proveedor
                     </button>
                 </div>
@@ -85,9 +103,14 @@ export const SuppliersPage = () => {
                             key: 'actions',
                             label: '',
                             render: r => (
-                                <button className="btn btn-ghost btn-sm" onClick={() => handleEdit(r)}>
-                                    <Icon name="edit" size={16} />
-                                </button>
+                                <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                                    <button className="btn btn-ghost btn-sm" title="Editar" onClick={() => handleEdit(r)}>
+                                        <Icon name="edit" size={16} />
+                                    </button>
+                                    <button className="btn btn-ghost btn-sm" title="Eliminar" style={{ color: 'var(--danger)' }} onClick={() => handleDelete(r)}>
+                                        <Icon name="delete" size={16} />
+                                    </button>
+                                </div>
                             )
                         }
                     ]}
@@ -102,6 +125,17 @@ export const SuppliersPage = () => {
                         onClose={() => { setShowNew(false); setEditingSupplier(null); }}
                         footer={
                             <Fragment>
+                                {editingSupplier && (
+                                    <button
+                                        type="button"
+                                        className="btn btn-danger"
+                                        disabled={saving}
+                                        style={{ marginRight: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}
+                                        onClick={() => handleDelete(editingSupplier)}
+                                    >
+                                        <Icon name="delete" size={16} /> Eliminar
+                                    </button>
+                                )}
                                 <button className="btn btn-ghost" disabled={saving} onClick={() => { setShowNew(false); setEditingSupplier(null); }}>Cancelar</button>
                                 <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{saving ? 'Guardando...' : 'Guardar'}</button>
                             </Fragment>

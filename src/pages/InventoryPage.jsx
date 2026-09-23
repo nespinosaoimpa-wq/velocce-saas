@@ -97,6 +97,7 @@ export const InventoryPage = ({ initialScannedCode = '' }) => {
             barcode: formData.barcode || null,
             cost_price: parseFloat(formData.cost_price) || 0,
             sell_price: parseFloat(formData.sell_price) || 0,
+            stock_type: formData.stock_type || 'UNIT',
             stock_quantity: parsedStockQty,
             stock_ml: parsedStockMl,
             stock_min: parseInt(formData.stock_min) || 0,

@@ -969,13 +969,33 @@ export const AppProvider = ({ children }) => {
         return updated;
     };
 
+    const deleteSupplier = async (id) => {
+        const supplier = (data.suppliers || []).find(s => s.id === id);
+        // Desvincular productos asociados en inventario para evitar errores de clave foránea
+        await supabase.from('inventory').update({ supplier_id: null }).eq('supplier_id', id);
+
+        const { error } = await supabase.from('suppliers').delete().eq('id', id);
+        if (error) { console.error("Error deleting supplier", error); throw error; }
+        logAudit('Borrar Proveedor', { supplier_id: id, supplier_name: supplier?.name });
+
+        setData(prev => ({
+            ...prev,
+            suppliers: (prev.suppliers || []).filter(s => s.id !== id),
+            inventory: (prev.inventory || []).map(i => i.supplier_id === id ? { ...i, supplier_id: null } : i)
+        }));
+    };
+
     // ==========================================
     // CRUD — Inventario
     // ==========================================
     const addInventoryItem = async (itemData) => {
-        const { data: newItem, error } = await supabase.from('inventory').insert([itemData]).select().single();
+        const itemToInsert = {
+            stock_type: 'UNIT',
+            ...itemData
+        };
+        const { data: newItem, error } = await supabase.from('inventory').insert([itemToInsert]).select().single();
         if (error) { console.error("Error creating inventory item", error); throw error; }
-        logAudit('Crear Item de Inventario', { product: itemData.name, barcode: itemData.barcode });
+        logAudit('Crear Item de Inventario', { product: itemToInsert.name, barcode: itemToInsert.barcode });
 
         setData(prev => ({ ...prev, inventory: [...prev.inventory, newItem] }));
         return newItem;
@@ -2097,6 +2117,7 @@ export const AppProvider = ({ children }) => {
             deleteInventoryItem,
             addSupplier,
             updateSupplier,
+            deleteSupplier,
             addWorkOrder,
             deleteWorkOrder,
             addItemsToWorkOrder,
