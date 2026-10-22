@@ -53,7 +53,7 @@ const PAGES = {
 
 function App() {
     const isOnline = useNetworkStatus();
-    const { data: MOCK, timeTrackingLogs, addTimeLog, isSyncing, companyStatus, logAudit } = useApp();
+    const { data: MOCK, timeTrackingLogs, addTimeLog, isSyncing, pendingSyncCount, triggerSync, companyStatus, logAudit } = useApp();
     const { user } = useAuth();
 
     // 1. Verificación de Dominio Autorizado (El único enlace válido de producción es velocce-saas.vercel.app)
@@ -406,7 +406,7 @@ function App() {
                 {!isOnline && (
                     <div className="offline-notice">
                         <Icon name="wifi_off" size={20} />
-                        SIN CONEXIÓN A INTERNET: Los cambios locales pueden no sincronizarse.
+                        MODO SIN CONEXIÓN ACTIVO: Tu trabajo se guarda de forma segura en este equipo y se sincronizará automáticamente al volver internet.
                     </div>
                 )}
 
@@ -415,6 +415,8 @@ function App() {
                     pageInfo={pageInfo}
                     isOnline={isOnline}
                     isSyncing={isSyncing}
+                    pendingSyncCount={pendingSyncCount}
+                    onSyncClick={triggerSync}
                     onMenuClick={() => setSidebarOpen(!sidebarOpen)}
                     showTimeModal={() => setShowTimeModal(true)}
                     showCameraScanner={() => setShowCameraScanner(true)}

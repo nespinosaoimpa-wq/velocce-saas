@@ -3,6 +3,13 @@ import { supabase, currentCompanyId } from '../lib/supabase';
 import { MOCK } from '../data/data';
 import * as XLSX from 'xlsx';
 import { useAuth } from './AuthContext';
+import { 
+    saveOfflineCache, 
+    getOfflineCache, 
+    enqueueOfflineAction, 
+    getOfflineQueue 
+} from '../lib/offlineStorage';
+import { processSyncQueue, isNetworkError } from '../lib/offlineSyncManager';
 
 const AppContext = createContext();
 
@@ -100,6 +107,77 @@ export const AppProvider = ({ children }) => {
     });
     const [loading, setLoading] = useState(true);
     const [isSyncing, setIsSyncing] = useState(false);
+    const [pendingSyncCount, setPendingSyncCount] = useState(0);
+
+    // ==========================================
+    // Smart Offline Cache & Background Sync Engine
+    // ==========================================
+    useEffect(() => {
+        let isMounted = true;
+        // 1. Carga ultra rápida desde el caché offline inteligente (0ms)
+        getOfflineCache(currentCompanyId).then(cached => {
+            if (isMounted && cached && (cached.workOrders?.length || cached.clients?.length || cached.inventory?.length)) {
+                console.log('⚡ [SmartCache] Restaurando datos de trabajo desde caché offline...');
+                setData(prev => ({
+                    ...prev,
+                    ...cached
+                }));
+                setLoading(false);
+            }
+        });
+
+        // 2. Comprobar acciones pendientes de sincronización
+        getOfflineQueue(currentCompanyId).then(q => {
+            if (isMounted) setPendingSyncCount(q.length);
+        });
+
+        return () => { isMounted = false; };
+    }, []);
+
+    const triggerSync = async () => {
+        if (!supabase || isSyncing) return;
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+        setIsSyncing(true);
+        try {
+            const { syncedCount } = await processSyncQueue(supabase, currentCompanyId);
+            const remaining = await getOfflineQueue(currentCompanyId);
+            setPendingSyncCount(remaining.length);
+
+            if (syncedCount > 0) {
+                console.log(`[SmartCache] ✅ ${syncedCount} acciones sincronizadas con Supabase.`);
+                await loadData();
+            }
+        } catch (err) {
+            console.warn('[SmartCache] Error en ciclo de sincronización:', err);
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
+    useEffect(() => {
+        const handleOnline = () => {
+            console.log('📶 Red restablecida. Sincronizando cambios locales con el servidor...');
+            triggerSync();
+        };
+
+        window.addEventListener('online', handleOnline);
+
+        const syncTimer = setInterval(() => {
+            if (typeof navigator !== 'undefined' && navigator.onLine) {
+                triggerSync();
+            }
+        }, 25000);
+
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+            triggerSync();
+        }
+
+        return () => {
+            window.removeEventListener('online', handleOnline);
+            clearInterval(syncTimer);
+        };
+    }, []);
 
     // ==========================================
     // Fichaje Personal (Time Tracking)
@@ -415,30 +493,37 @@ export const AppProvider = ({ children }) => {
             ]);
 
 
-            setData({
-                clients: (clients !== null) ? clients : MOCK.clients,
-                vehicles: (vehicles !== null) ? vehicles : MOCK.vehicles,
-                workOrders: (workOrders !== null) ? workOrders : MOCK.workOrders,
-                inventory: (inventory !== null) ? inventory : MOCK.inventory,
-                suppliers: (suppliers !== null) ? suppliers : MOCK.suppliers,
-                boxes: (boxes !== null) ? boxes : MOCK.boxes,
-                vehicleNotes: vehicleNotes || [],
-                payments: payments || [],
-                cashClosings: cashClosings || [],
-                appointments: appointments || [],
-                promotions: promotions || [],
-                assignments: assignments || [],
-                employees: (employees !== null) ? employees : MOCK.employees || [],
-                workOrderItems: workOrderItems || [],
-                dailyQuickServices: dailyQuickServices || [],
-                employeeEarnings: employeeEarnings || [],
-                quickServiceAssignments: quickServiceAssignments || [],
-                clientCredits: clientCredits || [],
+            const freshData = {
+                clients: (clients !== null) ? clients : (data.clients?.length ? data.clients : MOCK.clients),
+                vehicles: (vehicles !== null) ? vehicles : (data.vehicles?.length ? data.vehicles : MOCK.vehicles),
+                workOrders: (workOrders !== null) ? workOrders : (data.workOrders?.length ? data.workOrders : MOCK.workOrders),
+                inventory: (inventory !== null) ? inventory : (data.inventory?.length ? data.inventory : MOCK.inventory),
+                suppliers: (suppliers !== null) ? suppliers : (data.suppliers?.length ? data.suppliers : MOCK.suppliers),
+                boxes: (boxes !== null) ? boxes : (data.boxes?.length ? data.boxes : MOCK.boxes),
+                vehicleNotes: vehicleNotes || data.vehicleNotes || [],
+                payments: payments || data.payments || [],
+                cashClosings: cashClosings || data.cashClosings || [],
+                appointments: appointments || data.appointments || [],
+                promotions: promotions || data.promotions || [],
+                assignments: assignments || data.assignments || [],
+                employees: (employees !== null) ? employees : (data.employees?.length ? data.employees : MOCK.employees || []),
+                workOrderItems: workOrderItems || data.workOrderItems || [],
+                dailyQuickServices: dailyQuickServices || data.dailyQuickServices || [],
+                employeeEarnings: employeeEarnings || data.employeeEarnings || [],
+                quickServiceAssignments: quickServiceAssignments || data.quickServiceAssignments || [],
+                clientCredits: clientCredits || data.clientCredits || [],
                 // Tablas opcionales (pueden no existir)
                 vehicleHealth: [], brands: [],
                 dailyWorkLog: [], serviceHistory: [], 
                 activityLog: []
-            });
+            };
+
+            setData(freshData);
+
+            // Guardar en el caché offline inteligente para disponibilidad 100% sin internet
+            if (clients !== null || workOrders !== null) {
+                saveOfflineCache(currentCompanyId, freshData);
+            }
 
             // Cargar configuración sincronizada de botones de Gomería Express si existe en Supabase
             const quickActionsConfig = (promotions || []).find(p => p.name === '_QUICK_ACTIONS_SETTINGS_');
@@ -489,9 +574,14 @@ export const AppProvider = ({ children }) => {
 
             setTimeTrackingLogs(attendance_logs);
         } catch (e) {
-            console.error('CRITICAL: Error in bulk load', e);
+            console.warn('⚠️ [SmartCache] Error al cargar desde Supabase, manteniendo datos de trabajo cacheados:', e.message);
+            const cached = await getOfflineCache(currentCompanyId);
+            if (cached) {
+                setData(prev => ({ ...prev, ...cached }));
+            }
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
     };
 
     useEffect(() => {
@@ -1030,74 +1120,215 @@ export const AppProvider = ({ children }) => {
     // Órdenes de Trabajo
     // ==========================================
     const addWorkOrder = async (woData) => {
-        const { data: newWo, error } = await supabase.from('work_orders').insert([{
-            client_id: woData.client_id,
-            vehicle_id: woData.vehicle_id,
-            box_id: woData.box_id || null,
-            description: woData.description,
-            km_at_entry: woData.km_at_entry || 0,
-            labor_cost: woData.labor_cost,
-            parts_cost: woData.parts_cost,
-            total_price: woData.total_price,
-            status: woData.status || (woData.box_id ? 'En Box' : 'Pendiente'),
-            created_at: woData.date || new Date().toISOString(),
-            completed_at: (woData.status === 'Finalizado' || woData.status === 'Cobrado') ? (woData.date || new Date().toISOString()) : null,
-            labor_profit_percent: woData.labor_profit_percent || 100
-        }]).select('*, clients(*), vehicles(*)').single();
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
 
-        if (!error && newWo) {
-            // 1. Asignar mecánicos si existen
-            if (woData.mechanic_ids && woData.mechanic_ids.length > 0) {
-                const assignments = woData.mechanic_ids.map(mid => ({
-                    work_order_id: newWo.id,
-                    mechanic_id: mid,
-                    labor_commission_percent: woData.applied_commission_rate
-                }));
-                await supabase.from('work_order_assignments').insert(assignments);
+        const createOptimisticWO = async () => {
+            console.log('📶 [SmartCache] Guardando Orden de Trabajo en modo sin conexión...');
+            const tempId = `offline_wo_${Date.now()}`;
+            const existingNums = (data.workOrders || []).map(w => w.order_number || 0);
+            const nextOrderNumber = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 101;
+
+            const client = (data.clients || []).find(c => c.id === woData.client_id);
+            const vehicle = (data.vehicles || []).find(v => v.id === woData.vehicle_id);
+
+            const optimisticWO = {
+                id: tempId,
+                order_number: nextOrderNumber,
+                client_id: woData.client_id,
+                vehicle_id: woData.vehicle_id,
+                box_id: woData.box_id || null,
+                description: woData.description,
+                km_at_entry: woData.km_at_entry || 0,
+                labor_cost: woData.labor_cost,
+                parts_cost: woData.parts_cost,
+                total_price: woData.total_price,
+                status: woData.status || (woData.box_id ? 'En Box' : 'Pendiente'),
+                created_at: woData.date || new Date().toISOString(),
+                completed_at: (woData.status === 'Finalizado' || woData.status === 'Cobrado') ? (woData.date || new Date().toISOString()) : null,
+                labor_profit_percent: woData.labor_profit_percent || 100,
+                clients: client || null,
+                vehicles: vehicle || null,
+                _offline: true
+            };
+
+            // Descontar inventario localmente si traía productos
+            let nextInv = data.inventory || [];
+            if (woData.products && woData.products.length > 0) {
+                nextInv = nextInv.map(inv => {
+                    const matched = woData.products.find(p => p.id === inv.id && !p.is_custom);
+                    if (matched) {
+                        if (inv.stock_type === 'VOLUME') {
+                            return { ...inv, stock_ml: Math.max(0, (inv.stock_ml || 0) - (matched.qty * 1000)) };
+                        }
+                        return { ...inv, stock_quantity: Math.max(0, (inv.stock_quantity || 0) - matched.qty) };
+                    }
+                    return inv;
+                });
             }
 
-            // 2. Asignar productos si existen
-            if (woData.products && woData.products.length > 0) {
-                const items = woData.products.map(p => ({
-                    work_order_id: newWo.id,
-                    inventory_item_id: p.is_custom ? null : p.id,
-                    description: p.name,
-                    quantity: p.qty,
-                    unit_price: p.sell_price,
-                    total_price: p.sell_price * p.qty,
-                    is_labor: p.is_custom ? true : false
-                }));
-                await supabase.from('work_order_items').insert(items);
+            setData(prev => {
+                const updated = {
+                    ...prev,
+                    workOrders: [optimisticWO, ...(prev.workOrders || [])],
+                    inventory: nextInv
+                };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
 
-                // Descontar stock (Atómico)
-                for (const p of woData.products) {
-                    if (p.is_custom) continue; // No stock for custom service
-                    const useMl = p.stock_type === 'VOLUME';
-                    const adjustment = -p.qty;
-                    
-                    const { error: rpcError } = await supabase.rpc('adjust_inventory_stock', {
-                        item_id: p.id,
-                        adjustment: useMl ? Math.round(adjustment * 1000) : adjustment,
-                        use_ml: useMl
-                    });
-                    if (rpcError) {
-                        console.error("Error adjusting inventory stock:", rpcError);
-                        throw rpcError;
+            await enqueueOfflineAction(currentCompanyId, {
+                type: 'ADD_WORK_ORDER',
+                payload: woData,
+                tempId
+            });
+            const q = await getOfflineQueue(currentCompanyId);
+            setPendingSyncCount(q.length);
+            return optimisticWO;
+        };
+
+        if (isOffline) {
+            return await createOptimisticWO();
+        }
+
+        try {
+            const { data: newWo, error } = await supabase.from('work_orders').insert([{
+                client_id: woData.client_id,
+                vehicle_id: woData.vehicle_id,
+                box_id: woData.box_id || null,
+                description: woData.description,
+                km_at_entry: woData.km_at_entry || 0,
+                labor_cost: woData.labor_cost,
+                parts_cost: woData.parts_cost,
+                total_price: woData.total_price,
+                status: woData.status || (woData.box_id ? 'En Box' : 'Pendiente'),
+                created_at: woData.date || new Date().toISOString(),
+                completed_at: (woData.status === 'Finalizado' || woData.status === 'Cobrado') ? (woData.date || new Date().toISOString()) : null,
+                labor_profit_percent: woData.labor_profit_percent || 100
+            }]).select('*, clients(*), vehicles(*)').single();
+
+            if (!error && newWo) {
+                // 1. Asignar mecánicos si existen
+                if (woData.mechanic_ids && woData.mechanic_ids.length > 0) {
+                    const assignments = woData.mechanic_ids.map(mid => ({
+                        work_order_id: newWo.id,
+                        mechanic_id: mid,
+                        labor_commission_percent: woData.applied_commission_rate
+                    }));
+                    await supabase.from('work_order_assignments').insert(assignments);
+                }
+
+                // 2. Asignar productos si existen
+                if (woData.products && woData.products.length > 0) {
+                    const items = woData.products.map(p => ({
+                        work_order_id: newWo.id,
+                        inventory_item_id: p.is_custom ? null : p.id,
+                        description: p.name,
+                        quantity: p.qty,
+                        unit_price: p.sell_price,
+                        total_price: p.sell_price * p.qty,
+                        is_labor: p.is_custom ? true : false
+                    }));
+                    await supabase.from('work_order_items').insert(items);
+
+                    // Descontar stock
+                    for (const p of woData.products) {
+                        if (p.is_custom) continue;
+                        const useMl = p.stock_type === 'VOLUME';
+                        const adjustment = -p.qty;
+                        await supabase.rpc('adjust_inventory_stock', {
+                            item_id: p.id,
+                            adjustment: useMl ? Math.round(adjustment * 1000) : adjustment,
+                            use_ml: useMl
+                        });
                     }
                 }
+
+                logAudit('Crear Orden de Trabajo', { order_number: newWo.order_number, total_price: woData.total_price });
+                await loadData();
+                return newWo;
             }
-
-
-            logAudit('Crear Orden de Trabajo', { order_number: newWo.order_number, total_price: woData.total_price });
-
-            await loadData();
-            return newWo;
+            if (error) throw error;
+        } catch (err) {
+            if (isNetworkError(err)) {
+                console.warn('📶 [SmartCache] Error de red al crear OT. Guardando localmente...');
+                return await createOptimisticWO();
+            }
+            console.error("Error creating WO", err);
+            throw err;
         }
-        if (error) { console.error("Error creating WO", error); throw error; }
     };
     
     const addItemsToWorkOrder = async (woId, products) => {
         if (!products || products.length === 0) return;
+
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+
+        const applyOptimisticAdd = async () => {
+            console.log('📶 [SmartCache] Guardando productos de OT en modo sin conexión...');
+            const optimisticItems = products.map((p, idx) => ({
+                id: `offline_item_${Date.now()}_${idx}`,
+                work_order_id: woId,
+                inventory_item_id: p.is_custom ? null : p.id,
+                description: p.name,
+                quantity: p.qty,
+                unit_price: p.sell_price,
+                total_price: p.sell_price * p.qty,
+                is_labor: p.is_custom ? true : false
+            }));
+
+            setData(prev => {
+                const addedLabor = products.filter(p => p.is_custom).reduce((sum, p) => sum + (p.sell_price * p.qty), 0);
+                const addedParts = products.filter(p => !p.is_custom).reduce((sum, p) => sum + (p.sell_price * p.qty), 0);
+                const totalAdded = addedLabor + addedParts;
+
+                const nextWOs = (prev.workOrders || []).map(w => {
+                    if (w.id === woId) {
+                        return {
+                            ...w,
+                            labor_cost: (w.labor_cost || 0) + addedLabor,
+                            parts_cost: (w.parts_cost || 0) + addedParts,
+                            total_price: (w.total_price || 0) + totalAdded
+                        };
+                    }
+                    return w;
+                });
+
+                const nextItems = [...(prev.workOrderItems || []), ...optimisticItems];
+
+                // Descontar inventario local
+                const nextInv = (prev.inventory || []).map(inv => {
+                    const matched = products.find(p => p.id === inv.id && !p.is_custom);
+                    if (matched) {
+                        if (inv.stock_type === 'VOLUME') {
+                            return { ...inv, stock_ml: Math.max(0, (inv.stock_ml || 0) - (matched.qty * 1000)) };
+                        }
+                        return { ...inv, stock_quantity: Math.max(0, (inv.stock_quantity || 0) - matched.qty) };
+                    }
+                    return inv;
+                });
+
+                const updated = {
+                    ...prev,
+                    workOrders: nextWOs,
+                    workOrderItems: nextItems,
+                    inventory: nextInv
+                };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
+
+            await enqueueOfflineAction(currentCompanyId, {
+                type: 'ADD_ITEMS_TO_WO',
+                payload: { woId, products }
+            });
+            const q = await getOfflineQueue(currentCompanyId);
+            setPendingSyncCount(q.length);
+            return { offline: true, success: true };
+        };
+
+        if (isOffline) {
+            return await applyOptimisticAdd();
+        }
         
         try {
             const items = products.map(p => ({
@@ -1147,12 +1378,33 @@ export const AppProvider = ({ children }) => {
             logAudit('Agregar Productos a OT', { work_order_id: woId, products_count: products.length });
             return true;
         } catch (error) {
+            if (isNetworkError(error)) {
+                console.warn('📶 [SmartCache] Micro-corte de red al agregar productos. Guardando localmente...');
+                return await applyOptimisticAdd();
+            }
             console.error("Error adding items to WO", error);
             throw error;
         }
     };
 
     const updateWorkOrder = async (id, updates, paymentInfo = null, afipData = null, mechanicIds = null, creditOptions = null) => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            console.log('📶 [SmartCache] Modo sin conexión: Guardando actualización de OT en cola local...');
+            setData(prev => {
+                const nextWOs = (prev.workOrders || []).map(w => w.id === id ? { ...w, ...updates } : w);
+                const updated = { ...prev, workOrders: nextWOs };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
+            await enqueueOfflineAction(currentCompanyId, {
+                type: 'UPDATE_WORK_ORDER',
+                payload: { id, updates }
+            });
+            const q = await getOfflineQueue(currentCompanyId);
+            setPendingSyncCount(q.length);
+            return { offline: true, success: true };
+        }
+
         let payload = { ...updates };
         let { error } = await supabase.from('work_orders').update(payload).eq('id', id);
 
@@ -1171,12 +1423,31 @@ export const AppProvider = ({ children }) => {
             error = res.error;
         }
 
+        if (error && isNetworkError(error)) {
+            console.warn('📶 [SmartCache] Error de red al actualizar OT. Guardando en cola local...');
+            setData(prev => {
+                const nextWOs = (prev.workOrders || []).map(w => w.id === id ? { ...w, ...updates } : w);
+                const updated = { ...prev, workOrders: nextWOs };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
+            await enqueueOfflineAction(currentCompanyId, {
+                type: 'UPDATE_WORK_ORDER',
+                payload: { id, updates }
+            });
+            const q = await getOfflineQueue(currentCompanyId);
+            setPendingSyncCount(q.length);
+            return { offline: true, success: true };
+        }
+
         if (!error) {
             // Actualizar estado local inmediatamente
-            setData(prev => ({
-                ...prev,
-                workOrders: (prev.workOrders || []).map(w => w.id === id ? { ...w, ...updates, ...(payload.description ? { description: payload.description } : {}) } : w)
-            }));
+            setData(prev => {
+                const nextWOs = (prev.workOrders || []).map(w => w.id === id ? { ...w, ...updates, ...(payload.description ? { description: payload.description } : {}) } : w);
+                const updated = { ...prev, workOrders: nextWOs };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
             let freshAssignmentsList = null;
             // Update assignments if mechanicIds provided
             if (mechanicIds) {
@@ -1395,6 +1666,29 @@ export const AppProvider = ({ children }) => {
     };
 
     const deleteWorkOrder = async (id) => {
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        if (isOffline) {
+            setData(prev => {
+                const nextWOs = (prev.workOrders || []).filter(w => w.id !== id);
+                const updated = {
+                    ...prev,
+                    workOrders: nextWOs,
+                    assignments: (prev.assignments || []).filter(a => a.work_order_id !== id),
+                    payments: (prev.payments || []).filter(p => p.work_order_id !== id)
+                };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
+            await enqueueOfflineAction(currentCompanyId, {
+                type: 'DELETE_WORK_ORDER',
+                payload: { id }
+            });
+            const q = await getOfflineQueue(currentCompanyId);
+            setPendingSyncCount(q.length);
+            alert('OT eliminada en este equipo (se sincronizará con la nube al reconectar).');
+            return true;
+        }
+
         try {
             console.log("Iniciando borrado de OT:", id);
             
@@ -1415,18 +1709,45 @@ export const AppProvider = ({ children }) => {
             }
 
             const woToDelete = (data || []).find(w => w.id === id);
-            setData(prev => ({
-                ...prev,
-                workOrders: prev.workOrders.filter(wo => wo.id !== id),
-                assignments: (prev.assignments || []).filter(a => a.work_order_id !== id),
-                payments: (prev.payments || []).filter(p => p.work_order_id !== id)
-            }));
+            setData(prev => {
+                const nextWOs = (prev.workOrders || []).filter(w => w.id !== id);
+                const updated = {
+                    ...prev,
+                    workOrders: nextWOs,
+                    assignments: (prev.assignments || []).filter(a => a.work_order_id !== id),
+                    payments: (prev.payments || []).filter(p => p.work_order_id !== id)
+                };
+                saveOfflineCache(currentCompanyId, updated);
+                return updated;
+            });
             
             logAudit('Borrar Orden de Trabajo', { work_order_id: id, order_number: woToDelete?.order_number });
             
             alert('OT eliminada exitosamente.');
             return true;
         } catch (e) {
+            if (isNetworkError(e)) {
+                console.warn('📶 [SmartCache] Error de red al borrar OT. Guardando acción localmente...');
+                setData(prev => {
+                    const nextWOs = (prev.workOrders || []).filter(w => w.id !== id);
+                    const updated = {
+                        ...prev,
+                        workOrders: nextWOs,
+                        assignments: (prev.assignments || []).filter(a => a.work_order_id !== id),
+                        payments: (prev.payments || []).filter(p => p.work_order_id !== id)
+                    };
+                    saveOfflineCache(currentCompanyId, updated);
+                    return updated;
+                });
+                await enqueueOfflineAction(currentCompanyId, {
+                    type: 'DELETE_WORK_ORDER',
+                    payload: { id }
+                });
+                const q = await getOfflineQueue(currentCompanyId);
+                setPendingSyncCount(q.length);
+                alert('OT eliminada en este equipo (se sincronizará con la nube al reconectar).');
+                return true;
+            }
             console.error("Error deleting work order", e);
             alert("No se pudo eliminar la OT: " + e.message);
             throw e;
@@ -2152,6 +2473,8 @@ export const AppProvider = ({ children }) => {
             updateQuickActions,
             isSyncing,
             setIsSyncing,
+            pendingSyncCount,
+            triggerSync,
             logAudit,
             companyStatus,
             setCompanyStatus,

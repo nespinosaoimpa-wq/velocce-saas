@@ -5,6 +5,8 @@ export function Header({
     pageInfo, 
     isOnline, 
     isSyncing,
+    pendingSyncCount = 0,
+    onSyncClick,
     onMenuClick, 
     showTimeModal, 
     showCameraScanner, 
@@ -46,6 +48,27 @@ export function Header({
                         <Icon name="sync" />
                         Sincronizando...
                     </div>
+                )}
+                {pendingSyncCount > 0 && !isSyncing && (
+                    <button 
+                        type="button"
+                        className="sync-badge"
+                        onClick={onSyncClick}
+                        style={{ 
+                            background: 'rgba(234, 179, 8, 0.15)', 
+                            color: '#eab308', 
+                            border: '1px solid rgba(234, 179, 8, 0.3)',
+                            cursor: isOnline ? 'pointer' : 'default',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 5,
+                            fontSize: 12
+                        }}
+                        title={isOnline ? 'Hacé clic para forzar sincronización con el servidor' : 'Cambios guardados localmente. Se subirán al recuperar internet.'}
+                    >
+                        <Icon name="cloud_upload" size={14} />
+                        <span>{pendingSyncCount} {pendingSyncCount === 1 ? 'pendiente' : 'pendientes'}</span>
+                    </button>
                 )}
             </div>
             <div className="header-actions">

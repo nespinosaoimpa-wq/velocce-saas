@@ -183,7 +183,11 @@ export const WorkOrdersPage = () => {
             applied_commission_rate: (newOrder.applied_commission_rate !== '' ? parseFloat(newOrder.applied_commission_rate) : null) ?? (selectedMechanics.length > 0 ? selectedMechanics[0].commission_rate : 0)
         });
 
-        alert('✅ Orden de Trabajo creada con éxito.');
+        if (createdWO && createdWO._offline) {
+            alert('💾 Orden de Trabajo guardada en este equipo.\n\nSe sincronizará automáticamente con el servidor cuando haya conexión.');
+        } else {
+            alert('✅ Orden de Trabajo creada con éxito.');
+        }
         setShowNew(false);
         setNewOrder({ client_id: '', vehicle_id: '', box_id: '', km_at_entry: '', description: '', labor_cost: '', parts_cost: '', mechanic_ids: [], applied_commission_rate: '', labor_profit_percent: 100, isHistorical: false, customDate: new Date().toLocaleDateString('en-CA') });
         setClientSearch('');
@@ -305,8 +309,12 @@ export const WorkOrdersPage = () => {
         if (!addingProductsToWO || extraProducts.length === 0) return;
         setIsAddingProducts(true);
         try {
-            await addItemsToWorkOrder(addingProductsToWO.id, extraProducts);
-            alert('✅ Productos agregados correctamente a la OT.');
+            const res = await addItemsToWorkOrder(addingProductsToWO.id, extraProducts);
+            if (res && res.offline) {
+                alert('💾 Productos agregados y guardados en este equipo.\n\nSe sincronizarán automáticamente con el servidor cuando haya conexión.');
+            } else {
+                alert('✅ Productos agregados correctamente a la OT.');
+            }
             setAddingProductsToWO(null);
             setExtraProducts([]);
             setExtraProductSearch('');
