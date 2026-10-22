@@ -311,7 +311,12 @@ export const WorkOrdersPage = () => {
             setExtraProducts([]);
             setExtraProductSearch('');
         } catch (e) {
-            alert('Error al agregar productos: ' + e.message);
+            const isNetErr = e?.message?.includes('fetch') || e?.name === 'TypeError' || !navigator.onLine;
+            if (isNetErr) {
+                alert('⚠️ No se pudo completar por un micro-corte de conexión o lentitud de internet en esta notebook.\n\nPor favor verificá la señal de Wi-Fi e intentá nuevamente.');
+            } else {
+                alert('Error al agregar productos: ' + (e?.message || 'Error desconocido'));
+            }
         } finally {
             setIsAddingProducts(false);
         }

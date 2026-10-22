@@ -3,8 +3,39 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://oanurhkxqdxtqoauiizy.supabase.co';
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_DlDSyq8nUsw5D-SkGd6dyw_9rULN-gE';
 
+// Resilient fetch wrapper with automatic retries for transient network drops (e.g. Wi-Fi drops in workshops)
+const resilientFetch = async (input, init, retries = 2, delay = 600) => {
+    try {
+        return await fetch(input, init);
+    } catch (err) {
+        const isNetworkErr = err?.name === 'TypeError' || 
+                             err?.message?.includes('fetch') || 
+                             err?.message?.includes('network') ||
+                             err?.message?.includes('NetworkError');
+        if (retries > 0 && isNetworkErr) {
+            console.warn(`[Network Retry] Reconectando con el servidor tras micro-corte de red (${retries} reintentos restantes)...`);
+            await new Promise(r => setTimeout(r, delay));
+            return resilientFetch(input, init, retries - 1, delay * 1.5);
+        }
+        throw err;
+    }
+};
+
+export const formatNetworkErrorMessage = (error, defaultMsg = 'Ocurrió un error inesperado') => {
+    if (!error) return defaultMsg;
+    const msg = error.message || String(error);
+    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('network') || error.name === 'TypeError') {
+        return '⚠️ Error de conexión a internet o micro-corte de red en este dispositivo.\n\nPor favor verificá la señal Wi-Fi de esta notebook e intentá nuevamente.';
+    }
+    return msg;
+};
+
 const rawSupabase = supabaseUrl && supabaseKey
-    ? createClient(supabaseUrl, supabaseKey)
+    ? createClient(supabaseUrl, supabaseKey, {
+        global: {
+            fetch: resilientFetch
+        }
+    })
     : null;
 
 export const rawSupabaseClient = rawSupabase;

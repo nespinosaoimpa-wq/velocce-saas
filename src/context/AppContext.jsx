@@ -1113,24 +1113,7 @@ export const AppProvider = ({ children }) => {
             const { error: itemsError } = await supabase.from('work_order_items').insert(items);
             if (itemsError) throw itemsError;
 
-            // Descontar stock (Atómico)
-            for (const p of products) {
-                if (p.is_custom) continue; // No stock for custom service
-                const useMl = p.stock_type === 'VOLUME';
-                const adjustment = -p.qty;
-                
-                const { error: rpcError } = await supabase.rpc('adjust_inventory_stock', {
-                    item_id: p.id,
-                    adjustment: useMl ? Math.round(adjustment * 1000) : adjustment,
-                    use_ml: useMl
-                });
-                if (rpcError) {
-                    console.error("Error adjusting inventory stock:", rpcError);
-                    throw rpcError;
-                }
-            }
-
-            // Actualizar precio total de la OT
+            // Actualizar precio total de la OT de inmediato
             const wo = (data.workOrders || []).find(w => w.id === woId);
             if (wo) {
                 const addedLabor = products.filter(p => p.is_custom).reduce((sum, p) => sum + (p.sell_price * p.qty), 0);
@@ -1147,6 +1130,18 @@ export const AppProvider = ({ children }) => {
                     total_price: newTotal
                 }).eq('id', woId);
             }
+
+            // Descontar stock (en paralelo y tolerante a fallas individuales)
+            const stockPromises = products.filter(p => !p.is_custom).map(p => {
+                const useMl = p.stock_type === 'VOLUME';
+                const adjustment = -p.qty;
+                return supabase.rpc('adjust_inventory_stock', {
+                    item_id: p.id,
+                    adjustment: useMl ? Math.round(adjustment * 1000) : adjustment,
+                    use_ml: useMl
+                });
+            });
+            await Promise.allSettled(stockPromises);
 
             await loadData();
             logAudit('Agregar Productos a OT', { work_order_id: woId, products_count: products.length });
